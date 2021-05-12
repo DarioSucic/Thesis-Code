@@ -1,0 +1,1 @@
+cargo test measure_losses -- --nocapture

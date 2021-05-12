@@ -1,0 +1,14 @@
+[package]
+name = "pam"
+version = "0.1.0"
+edition = "2018"
+
+[[bench]]
+name = "bench"
+harness = false
+
+[dependencies]
+num-traits = "*"
+
+[dev-dependencies]
+criterion = { version = "0.3", features = ["html_reports"]}
