@@ -1,8 +1,8 @@
-use crate::BoundedNum;
+use crate::Float;
 
 pub mod matrix;
 
-pub trait Measurable<T: BoundedNum> {
+pub trait Measurable<T: Float> {
     /// Measure the dissimilarity between two elements in the collection
     ///
     /// Note that the measure does not have to be symmetric. i.e `measure(i, j) != measure(j, i)` is possible

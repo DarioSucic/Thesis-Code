@@ -1,18 +1,10 @@
-use std::fmt::Debug;
-
-use num_traits::{Bounded, Num, NumOps};
-
-pub trait BoundedNum: Num + Bounded + NumOps + PartialOrd + Copy + Debug {}
-
-impl BoundedNum for f64 {}
-impl BoundedNum for f32 {}
+pub use num_traits::Float;
 
 pub mod algorithms;
 pub mod measure;
 
 #[cfg(test)]
 mod tests {
-
     use std::fs::File;
     use std::io::{self, BufRead, BufReader};
 
@@ -74,8 +66,8 @@ mod tests {
             }
         }
 
-        // test_algorithms![PAM, BanditPAM];
-        test_algorithms![PAM];
+        test_algorithms![PAM, BanditPAM];
+        // test_algorithms![PAM];
 
         println!("\n----------------------------------------------------------------------\n");
     }

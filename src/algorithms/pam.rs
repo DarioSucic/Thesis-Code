@@ -2,13 +2,13 @@ use super::*;
 
 pub struct PAM;
 
-impl<T: BoundedNum> Solver<T> for PAM {
+impl<T: Float> Solver<T> for PAM {
     fn fit(d: &impl Measurable<T>, k: usize) -> Vec<usize> {
         fit(d, k)
     }
 }
 
-fn fit<T: BoundedNum>(d: &impl Measurable<T>, k: usize) -> Vec<usize> {
+fn fit<T: Float>(d: &impl Measurable<T>, k: usize) -> Vec<usize> {
     let mut medoid_indices = vec![0; k];
     let mut previous = vec![0; k];
 
@@ -21,7 +21,6 @@ fn fit<T: BoundedNum>(d: &impl Measurable<T>, k: usize) -> Vec<usize> {
         swap(d, &mut medoid_indices);
 
         if medoid_indices == previous {
-            println!("Breaking at iteration: {}", _iteration);
             break;
         }
     }
@@ -29,12 +28,12 @@ fn fit<T: BoundedNum>(d: &impl Measurable<T>, k: usize) -> Vec<usize> {
     medoid_indices
 }
 
-fn build<T: BoundedNum>(d: &impl Measurable<T>, medoid_indices: &mut [usize]) {
+fn build<T: Float>(d: &impl Measurable<T>, medoid_indices: &mut [usize]) {
     let num_elements = d.num_elements();
     let num_medoids = medoid_indices.len();
 
     for k in 0..num_medoids {
-        let mut min_distance = T::max_value();
+        let mut min_distance = T::infinity();
         let mut best = 0;
 
         for i in 0..num_elements {
@@ -63,11 +62,11 @@ fn build<T: BoundedNum>(d: &impl Measurable<T>, medoid_indices: &mut [usize]) {
     }
 }
 
-fn swap<T: BoundedNum>(d: &impl Measurable<T>, medoid_indices: &mut [usize]) {
+fn swap<T: Float>(d: &impl Measurable<T>, medoid_indices: &mut [usize]) {
     let num_elements = d.num_elements();
     let num_medoids = medoid_indices.len();
 
-    let mut min_distance = T::max_value();
+    let mut min_distance = T::infinity();
     let mut best = 0;
     let mut medoid_to_swap = 0;
 
