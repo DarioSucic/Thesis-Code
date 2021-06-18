@@ -10,6 +10,7 @@ harness = false
 [dependencies]
 num-traits = "0.2.14"
 rand = "0.8.3"
+superluminal-perf = "0.1.1"
 
 [dev-dependencies]
 criterion = { version = "0.3", features = ["html_reports"]}

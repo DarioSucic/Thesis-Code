@@ -1,14 +1,12 @@
-use std::{thread::current, vec};
-
+use std::time::Instant;
 use super::*;
+use crate::utils::*;
 use rand::prelude::*;
 
 pub struct BanditPAM;
 
 const BUILD_CONFIDENCE: usize = 1000;
 const SWAP_CONFIDENCE: usize = 10_000;
-const PRECISION: f64 = 0.001;
-const BATCH_SIZE: usize = 100;
 const MAX_ITER: usize = 1000;
 
 impl<T: Float> Solver<T> for BanditPAM {
@@ -19,14 +17,22 @@ impl<T: Float> Solver<T> for BanditPAM {
 
 fn fit<T: Float>(d: &impl Measurable<T>, k: usize) -> Vec<usize> {
     let mut medoid_indices = vec![0; k];
-    let mut medoid_mat = vec![0; d.num_elements() * k];
+    let batch_size = d.num_elements().min(100);
 
-    build(d, &mut medoid_indices, &mut medoid_mat);
+    superluminal_perf::begin_event("BUILD");
+    build(d, &mut medoid_indices, batch_size);
+    superluminal_perf::end_event();
+
+    let mut assignments = vec![0; d.num_elements()];
+    
+    superluminal_perf::begin_event("SWAP");
+    swap(d, &mut medoid_indices, &mut assignments, batch_size);
+    superluminal_perf::end_event();
 
     medoid_indices
 }
 
-fn build<T: Float>(d: &impl Measurable<T>, medoid_indices: &mut [usize], medoid_mat: &mut [usize]) {
+fn build<T: Float>(d: &impl Measurable<T>, medoid_indices: &mut [usize], batch_size: usize) {
     let num_elements = d.num_elements();
     let num_medoids = medoid_indices.len();
 
@@ -49,28 +55,27 @@ fn build<T: Float>(d: &impl Measurable<T>, medoid_indices: &mut [usize], medoid_
         exact_mask.fill(false);
         estimates.fill(T::zero());
 
-        build_sigma(d, &mut best_distances, &mut sigma, use_absolute);
+        superluminal_perf::begin_event("build_sigma");
+        build_sigma(d, &mut best_distances, &mut sigma, use_absolute, batch_size);
+        superluminal_perf::end_event();
 
         // WARNING: LOGIC DIFFERENCE
-        while candidates.iter().any(|&x| !x) {
+        while candidates.contains(&true) {
             // TODO: Allocation
             let compute_exactly = t_samples
                 .iter()
                 .zip(&exact_mask)
-                .map(|(&ts, &em)| ((ts + BATCH_SIZE) >= num_elements) != em)
+                .map(|(&ts, &em)| ((ts + batch_size) >= num_elements) != em)
                 .collect::<Vec<bool>>();
 
             // Performance: O(n) for no reason
             if compute_exactly.contains(&true) {
                 // PATTERN
-                let targets = compute_exactly
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, &v)| v == true)
-                    .map(|(i, _)| i)
-                    .collect::<Vec<usize>>();
+                let targets = find_indices(&compute_exactly);
 
-                let result = build_target(d, &targets, num_elements, &best_distances, use_absolute);
+                superluminal_perf::begin_event("build_target1");
+                let result = build_target(d, &targets, num_elements, &best_distances, use_absolute, batch_size);
+                superluminal_perf::end_event();
 
                 for (&i, &r) in targets.iter().zip(&result) {
                     estimates[i] = r;
@@ -83,28 +88,25 @@ fn build<T: Float>(d: &impl Measurable<T>, medoid_indices: &mut [usize], medoid_
             }
 
             // Optimization: Could move right after for-loop above?
-            if candidates.iter().all(|&x| x) {
+            if !candidates.contains(&true) {
                 break;
             }
 
             // PATTERN
-            let targets = candidates
-                .iter()
-                .enumerate()
-                .filter(|(_, &v)| v == true)
-                .map(|(i, _)| i)
-                .collect::<Vec<usize>>();
+            let targets = find_indices(&candidates);
 
-            let result = build_target(d, &targets, num_elements, &best_distances, use_absolute);
+            superluminal_perf::begin_event("build_target2");
+            let result = build_target(d, &targets, num_elements, &best_distances, use_absolute, batch_size);
+            superluminal_perf::end_event();
 
-            let bs = T::from(BATCH_SIZE).unwrap();
+            let bs = T::from(batch_size).unwrap();
             for (&i, &r) in targets.iter().zip(&result) {
                 let ts = T::from(t_samples[i]).unwrap();
                 estimates[i] = ts * estimates[i] + (r * bs) / (bs + ts);
             }
 
             for &i in &targets {
-                t_samples[i] += BATCH_SIZE;
+                t_samples[i] += batch_size;
             }
 
             let adjust = T::from(p).unwrap().ln();
@@ -115,26 +117,18 @@ fn build<T: Float>(d: &impl Measurable<T>, medoid_indices: &mut [usize], medoid_
                 lcbs[i] = estimates[i] - cb_delta;
             }
 
+            let (_idx, &ucbs_min) = argmin(&ucbs);
             for i in 0..num_elements {
-                let ucbs_min = *ucbs
-                    .iter()
-                    .min_by(|a, b| a.partial_cmp(b).unwrap())
-                    .unwrap();
                 candidates[i] = (lcbs[i] < ucbs_min) && !exact_mask[i];
             }
 
             step_count += 1;
         }
 
-        let (lcbs_index_min, _lcbs_min) = lcbs
-            .iter()
-            .enumerate()
-            .min_by(|(_i, a), (_j, b)| a.partial_cmp(b).unwrap())
-            .unwrap();
+        let (lcbs_index_min, _lcbs_min) = argmin(&lcbs);
 
         let medoid = lcbs_index_min;
         medoid_indices[k] = medoid;
-        medoid_mat[k * num_elements] = medoid;
 
         for i in 0..num_elements {
             let cost = d.measure(i, medoid);
@@ -162,21 +156,22 @@ fn build_sigma<T: Float>(
     best_distances: &mut Vec<T>,
     sigma: &mut Vec<T>,
     use_absolute: bool,
+    batch_size: usize
 ) {
     let n = d.num_elements();
 
     // Draw `batch_size` elements from [0, n-1] without replacement
     // Currently untested, but should work?
     let mut range = (0..n).collect::<Vec<usize>>();
-    let (random_indices, _) = range.partial_shuffle(&mut thread_rng(), BATCH_SIZE);
+    let (random_indices, _) = range.partial_shuffle(&mut thread_rng(), batch_size);
 
     // Optimization: if batch_size > n, this overallocates
-    let mut sample = vec![T::zero(); BATCH_SIZE];
+    let mut sample = vec![T::zero(); batch_size];
 
     // Warning: Probably breaks if batch_size > n
 
     for i in 0..n {
-        for j in 0..BATCH_SIZE {
+        for j in 0..batch_size {
             let random_idx = random_indices[j];
             let cost = d.measure(i, random_idx);
 
@@ -199,6 +194,7 @@ fn build_target<T: Float>(
     num_elements: usize,
     best_distances: &Vec<T>,
     use_absolute: bool,
+    batch_size: usize
 ) -> Vec<T> {
     let n = d.num_elements();
 
@@ -207,13 +203,13 @@ fn build_target<T: Float>(
     // Draw `batch_size` elements from [0, n-1] without replacement
     // Currently untested, but should work?
     let mut range = (0..n).collect::<Vec<usize>>();
-    let (random_indices, _) = range.partial_shuffle(&mut thread_rng(), BATCH_SIZE);
+    let (random_indices, _) = range.partial_shuffle(&mut thread_rng(), batch_size);
 
-    for i in 0..n {
+    for i in 0..targets.len() {
         let target_idx = targets[i];
         let mut total = T::zero();
 
-        for j in 0..n {
+        for j in 0..batch_size {
             let random_idx = random_indices[j];
             let cost = d.measure(random_idx, target_idx);
 
@@ -225,13 +221,13 @@ fn build_target<T: Float>(
             }
         }
 
-        estimates[i] = total / T::from(BATCH_SIZE).unwrap();
+        estimates[i] = total / T::from(batch_size).unwrap();
     }
 
     estimates
 }
 
-fn swap<T: Float>(d: &impl Measurable<T>, medoid_indices: &mut [usize], assignments: &mut [usize]) {
+fn swap<T: Float>(d: &impl Measurable<T>, medoid_indices: &mut [usize], assignments: &mut [usize], batch_size: usize) {
     let num_elements = d.num_elements();
     let num_medoids = medoid_indices.len();
     let p = num_elements * num_medoids * SWAP_CONFIDENCE;
@@ -268,6 +264,7 @@ fn swap<T: Float>(d: &impl Measurable<T>, medoid_indices: &mut [usize], assignme
             &second_distances,
             assignments,
             num_medoids,
+            batch_size
         );
 
         candidates.fill(true);
@@ -275,7 +272,8 @@ fn swap<T: Float>(d: &impl Measurable<T>, medoid_indices: &mut [usize], assignme
         estimates.fill(T::zero());
         t_samples.fill(0);
 
-        while candidates.iter().any(|&x| !x) {
+        // While there is at least one candidate
+        while candidates.contains(&false) {
             calc_best_distances_swap(
                 d,
                 medoid_indices,
@@ -287,13 +285,10 @@ fn swap<T: Float>(d: &impl Measurable<T>, medoid_indices: &mut [usize], assignme
             let compute_exactly = t_samples
                 .iter()
                 .zip(&exact_mask)
-                .map(|(&ts, &em)| ((ts + BATCH_SIZE) >= num_elements) != em);
+                .map(|(&ts, &em)| ((ts + batch_size) >= num_elements) != em)
+                .collect::<Vec<bool>>();
 
-            let targets = compute_exactly
-                .enumerate()
-                .filter(|&(_i, ce)| ce)
-                .map(|(i, _ce)| i)
-                .collect::<Vec<usize>>();
+            let targets = find_indices(&compute_exactly);
 
             if !targets.is_empty() {
                 let result = swap_target(
@@ -315,16 +310,70 @@ fn swap<T: Float>(d: &impl Measurable<T>, medoid_indices: &mut [usize], assignme
                 }
 
                 for i in 0..num_elements {
-                    let ucbs_min = *ucbs
-                        .iter()
-                        .min_by(|a, b| a.partial_cmp(b).unwrap())
-                        .unwrap();
+                    let (_idx, &ucbs_min) = argmin(&ucbs);
                     candidates[i] = (lcbs[i] < ucbs_min) && !exact_mask[i];
                 }
             }
 
-            
+            if !candidates.contains(&true) {
+                break;
+            }
+
+            let targets = find_indices(&candidates);
+            let result = swap_target(
+                d,
+                medoid_indices,
+                &targets,
+                batch_size,
+                &best_distances,
+                &second_distances,
+                assignments,
+            );
+
+            let bs = T::from(batch_size).unwrap();
+            for (&i, &r) in targets.iter().zip(&result) {
+                let ts = T::from(t_samples[i]).unwrap();
+                estimates[i] = ts * estimates[i] + (r * bs) / (ts + bs);
+            }
+
+            for &i in &targets {
+                t_samples[i] += batch_size;
+            }
+
+            let adjust = T::from(p).unwrap().ln();
+            for &i in &targets {
+                let ts = T::from(t_samples[i]).unwrap();
+                let cb_delta = sigma[i] * (adjust / ts).sqrt();
+                ucbs[i] = estimates[i] + cb_delta;
+                lcbs[i] = estimates[i] - cb_delta;
+            }
+
+            for i in 0..num_elements {
+                let (_idx, &ucbs_min) = argmin(&ucbs);
+                candidates[i] = (lcbs[i] < ucbs_min) && !exact_mask[i];
+            }
+
+            // targets = find_indices(&candidates);
         }
+
+        let (lcbs_index_min, _lcbs_min) = argmin(&lcbs);
+        let new_medoid = lcbs_index_min;
+
+        // TODO: Num medoids or num elements?
+        let k = new_medoid % num_medoids;
+        let n = new_medoid / num_medoids;
+
+        swap_performed = medoid_indices[k] != n;
+        // steps++;
+
+        medoid_indices[k] = n;
+        calc_best_distances_swap(
+            d,
+            medoid_indices,
+            &mut best_distances,
+            &mut second_distances,
+            assignments,
+        );
     }
 }
 
@@ -408,19 +457,20 @@ fn swap_sigma<T: Float>(
     second_distances: &[T],
     assignments: &[usize],
     num_medoids: usize,
+    batch_size: usize
 ) {
     let num_elements = d.num_elements();
 
     let mut range = (0..num_elements).collect::<Vec<usize>>();
-    let (random_indices, _) = range.partial_shuffle(&mut thread_rng(), BATCH_SIZE);
+    let (random_indices, _) = range.partial_shuffle(&mut thread_rng(), batch_size);
 
-    let mut sample = vec![T::zero(); BATCH_SIZE];
+    let mut sample = vec![T::zero(); batch_size];
 
     for i in 0..num_elements * num_medoids {
         let n = i / num_medoids;
         let k = i % num_medoids;
 
-        for j in 0..BATCH_SIZE {
+        for j in 0..batch_size {
             let random_idx = random_indices[j];
             let cost = d.measure(n, random_idx);
 

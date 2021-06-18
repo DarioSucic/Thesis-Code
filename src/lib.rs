@@ -1,7 +1,13 @@
-pub use num_traits::Float;
+use std::fmt::Debug;
+
+pub trait Float : num_traits::Float + Debug {}
+
+impl Float for f64 {}
+impl Float for f32 {}
 
 pub mod algorithms;
 pub mod measure;
+pub mod utils;
 
 #[cfg(test)]
 mod tests {
@@ -47,7 +53,6 @@ mod tests {
     fn measure_losses() {
         use crate::algorithms::{BanditPAM, Solver, PAM};
         use crate::measure::matrix::DissimilarityMatrix;
-        use crate::measure::Measurable;
 
         let points = load_points("C:/Users/dario/thesis/code/BanditPAM/test_data").unwrap();
 

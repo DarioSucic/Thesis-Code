@@ -6,7 +6,7 @@ use std::{
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use pam::{
-    algorithms::{Solver, PAM},
+    algorithms::{BanditPAM, Solver, PAM},
     measure::{matrix::DissimilarityMatrix, Measurable},
 };
 
@@ -33,9 +33,9 @@ fn load_points(filename: &str) -> io::Result<Vec<(f64, f64)>> {
 }
 
 pub fn criterion_benchmark(c: &mut Criterion) {
-    let mut group = c.benchmark_group("sizes");
+    let mut group = c.benchmark_group("algorithms");
     group.warm_up_time(Duration::from_secs_f64(0.5));
-    group.measurement_time(Duration::from_secs_f64(3.0));
+    group.measurement_time(Duration::from_secs_f64(2.0));
     group.sample_size(10);
 
     let sizes = [
@@ -46,22 +46,26 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         // ("huge"  , 32, 4096)
     ];
 
-    for &(size_name, num_clusters, _) in &sizes {
-        let points = load_points(&format!("benches/test_data/{}", size_name))
-            .expect("Failed to load points");
-        let d = DissimilarityMatrix::from_points(&points, l2_norm);
-
-        let benchmark_id = BenchmarkId::from_parameter(&format!(
-            "{}(k={},n={})",
-            size_name,
-            num_clusters,
-            d.num_elements()
-        ));
-
-        group.bench_function(benchmark_id, |b| {
-            b.iter(|| black_box(PAM::fit(&d, num_clusters)))
-        });
+    macro_rules! bench_algorithms {
+        [$( $alg:ident ),*] => {
+            $(
+                for &(size_name, num_clusters, num_elements) in &sizes {
+                    let points = load_points(&format!("benches/test_data/{}", size_name))
+                        .expect("Failed to load points");
+                    let d = DissimilarityMatrix::from_points(&points, l2_norm);
+                    let benchmark_id = BenchmarkId::from_parameter(&format!(
+                        "{}/{}(k={},n={})",
+                        stringify!($alg), size_name, num_clusters, num_elements
+                    ));
+                    group.bench_function(benchmark_id, |b| {
+                        b.iter(|| black_box($alg::fit(&d, num_clusters)))
+                    });
+                }
+            )*
+        }
     }
+
+    bench_algorithms![PAM, BanditPAM];
 }
 
 criterion_group!(benches, criterion_benchmark);
